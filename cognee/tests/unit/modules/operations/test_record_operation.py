@@ -229,9 +229,7 @@ async def test_operation_rows_are_invisible_to_pipeline_status_readers(ops_engin
 
 
 @pytest.mark.asyncio
-async def test_graph_warmup_ignores_operation_rows_but_reads_pipeline_runs(
-    ops_engine, monkeypatch
-):
+async def test_graph_warmup_ignores_operation_rows_but_reads_pipeline_runs(ops_engine, monkeypatch):
     """Only a named, status-bearing pipeline run can make a graph read warm."""
     user = _fake_user()
     dataset_id = uuid4()
@@ -241,9 +239,7 @@ async def test_graph_warmup_ignores_operation_rows_but_reads_pipeline_runs(
     async def permitted_dataset_ids(_user_id):
         return [dataset_id]
 
-    monkeypatch.setattr(
-        permission_methods, "get_permitted_dataset_ids", permitted_dataset_ids
-    )
+    monkeypatch.setattr(permission_methods, "get_permitted_dataset_ids", permitted_dataset_ids)
     graph_warmup_mod.clear_warmup_cache()
 
     async with record_operation("remember", user=user, dataset_id=dataset_id):
