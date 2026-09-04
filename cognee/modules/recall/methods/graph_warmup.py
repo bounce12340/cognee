@@ -1,18 +1,21 @@
 """Cheap warm-graph probe for recall's graph-lane short-circuit.
 
 The probe never touches a graph or vector engine: it asks the relational
-``pipeline_runs`` table whether *any* pipeline has ever run for the permitted
-datasets. Ingestion through the public surface (add/cognify/memify/improve/
-code-graph via ``run_tasks``) logs a PipelineRun row with a dataset_id at
-start, so a dataset that has been through any pipeline reads warm. add-only
-datasets (staged, not yet cognified) also read warm on purpose: the deferred
-custom-pipeline surface (``run_pipeline`` → ``run_tasks_base``) builds graphs
-without logging runs, so the only fail-safe signal is "some pipeline touched
-this dataset". Over-reporting warm merely falls through to a normal search —
-the pre-feature behavior — while under-reporting cold would hide a populated
-graph. The only datasets that can read cold despite holding graph data are
-ones created entirely outside add() and populated via ``run_tasks_base``;
-disable the guard (RECALL_WARMUP_SHORTCIRCUIT=false) in that setup.
+``pipeline_runs`` table whether any named pipeline with a status has run for
+the permitted datasets. Ingestion through the public surface
+(add/cognify/memify/improve/code-graph via ``run_tasks``) logs a PipelineRun
+row with a dataset_id at start, so a dataset that has been through any
+pipeline reads warm. Operation records (``record_operation``) deliberately
+have neither a pipeline name nor a status and must not count as graph
+readiness evidence. add-only datasets (staged, not yet cognified) also read
+warm on purpose: the deferred custom-pipeline surface
+(``run_pipeline`` → ``run_tasks_base``) builds graphs without logging runs, so
+the only fail-safe signal is "some pipeline touched this dataset".
+Over-reporting warm merely falls through to a normal search — the pre-feature
+behavior — while under-reporting cold would hide a populated graph. The only
+datasets that can read cold despite holding graph data are ones created
+entirely outside add() and populated via ``run_tasks_base``; disable the guard
+(RECALL_WARMUP_SHORTCIRCUIT=false) in that setup.
 
 Explicitly passed ``dataset_ids`` are intersected with the datasets the user
 can read before the probe runs, so this module can never act as a
@@ -58,8 +61,9 @@ async def get_graph_datapoint_count(user, dataset_ids: list[UUID] | None) -> int
     ``dataset_ids=None`` means all datasets the user can read; an explicit
     list is filtered down to the datasets the user can read, so unpermitted
     or nonexistent ids contribute nothing (they can never leak state).
-    Returns 0 only when no pipeline run exists for those datasets; otherwise
-    a large positive number (the relational DB has no cheap exact count).
+    Returns 0 only when no named, status-bearing pipeline run exists for those
+    datasets; otherwise a large positive number (the relational DB has no
+    cheap exact count).
     """
     from sqlalchemy import exists, select
 
@@ -78,7 +82,15 @@ async def get_graph_datapoint_count(user, dataset_ids: list[UUID] | None) -> int
 
     async with get_relational_engine().get_async_session() as session:
         warm = (
-            await session.execute(select(exists().where(PipelineRun.dataset_id.in_(ids))))
+            await session.execute(
+                select(
+                    exists().where(
+                        PipelineRun.dataset_id.in_(ids),
+                        PipelineRun.pipeline_name.isnot(None),
+                        PipelineRun.status.isnot(None),
+                    )
+                )
+            )
         ).scalar()
 
     return _WARM_COUNT if warm else 0

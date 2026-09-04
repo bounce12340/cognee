@@ -29,6 +29,7 @@ record_operation_mod = importlib.import_module("cognee.modules.operations.record
 get_pipeline_status_mod = importlib.import_module(
     "cognee.modules.pipelines.operations.get_pipeline_status"
 )
+graph_warmup_mod = importlib.import_module("cognee.modules.recall.methods.graph_warmup")
 
 record_operation = record_operation_mod.record_operation
 get_current_operation = record_operation_mod.get_current_operation
@@ -52,6 +53,8 @@ async def ops_engine(tmp_path, monkeypatch):
 
     for module in (record_operation_mod, get_pipeline_status_mod):
         monkeypatch.setattr(module, "get_relational_engine", lambda: engine)
+    relational_mod = importlib.import_module("cognee.infrastructure.databases.relational")
+    monkeypatch.setattr(relational_mod, "get_relational_engine", lambda: engine)
 
     yield engine
 
@@ -223,3 +226,46 @@ async def test_operation_rows_are_invisible_to_pipeline_status_readers(ops_engin
     statuses = await get_pipeline_status_mod.get_pipeline_status([dataset_id], "cognify_pipeline")
 
     assert statuses == {str(dataset_id): PipelineRunStatus.DATASET_PROCESSING_COMPLETED}
+
+
+@pytest.mark.asyncio
+async def test_graph_warmup_ignores_operation_rows_but_reads_pipeline_runs(ops_engine, monkeypatch):
+    """Only a named, status-bearing pipeline run can make a graph read warm."""
+    user = _fake_user()
+    dataset_id = uuid4()
+
+    permission_methods = importlib.import_module("cognee.modules.users.permissions.methods")
+
+    async def permitted_dataset_ids(_user_id):
+        return [dataset_id]
+
+    monkeypatch.setattr(permission_methods, "get_permitted_dataset_ids", permitted_dataset_ids)
+    graph_warmup_mod.clear_warmup_cache()
+
+    async with record_operation("remember", user=user, dataset_id=dataset_id):
+        pass
+
+    assert await graph_warmup_mod.get_graph_datapoint_count(user, [dataset_id]) == 0
+    assert await graph_warmup_mod.is_memory_warm(user, [dataset_id]) == (False, 0)
+
+    async with ops_engine.get_async_session() as session:
+        session.add(
+            PipelineRun(
+                pipeline_run_id=uuid4(),
+                pipeline_name="add_pipeline",
+                pipeline_id=uuid4(),
+                status=PipelineRunStatus.DATASET_PROCESSING_INITIATED,
+                dataset_id=dataset_id,
+                run_info={},
+            )
+        )
+        await session.commit()
+
+    assert (
+        await graph_warmup_mod.get_graph_datapoint_count(user, [dataset_id])
+        == graph_warmup_mod._WARM_COUNT
+    )
+    assert await graph_warmup_mod.is_memory_warm(user, [dataset_id]) == (
+        True,
+        graph_warmup_mod._WARM_COUNT,
+    )
